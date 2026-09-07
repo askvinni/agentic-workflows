@@ -202,15 +202,17 @@ This walkthrough covers a substantial piece of work — say, refactoring authent
 Do this once per repo before any agent touches it.
 
 ```sh
-cd my-repo
+# From the agentic-workflows directory — sets up tools, Claude Code hooks, and the current repo
+uv run setup.py
 
-kata init                    # binds the repo to a kata project
-roborev init                 # installs the git post-commit hook
-roborev agent-hook install   # adds a Stop hook so roborev briefs the agent at session end
-roborev skills install       # installs /roborev-fix and related Claude Code skills
+# Or separately:
+uv run setup.py --global-only   # tools + hooks only (first time on a new machine)
+uv run setup.py --repo-only     # initialise a specific repo (run from that repo's root)
 ```
 
-After `roborev init`, every commit in the repo triggers a background AI review automatically — you don't have to think about it again. After `roborev agent-hook install`, the agent will be shown any open review findings before it finishes a session.
+`setup.py` is idempotent — re-running it is safe at any time. It installs kata, roborev, and kwt if missing; configures two global Claude Code Stop hooks; and when run from a git repo, runs `kata init`, `roborev init`, and wires up agent hooks for that repo.
+
+After repo setup, every commit triggers a background AI review automatically — you don't have to think about it again. The agent will be shown any open review findings before it finishes a session.
 
 ### 2. Break the work into issues `[Human]`
 
