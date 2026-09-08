@@ -1,16 +1,17 @@
 # Agentic Workflows
 
-Local environment setup using [kenn.io](https://kenn.io) tooling for human-assisted and fully-autonomous agentic software work.
+Local environment setup using [kenn.io](https://kenn.io) tooling and [engram](https://github.com/askvinni/engram) for human-assisted and fully-autonomous agentic software work.
 
 ## Overview
 
-Four tools form the stack:
+Five tools form the stack:
 
 | Tool | Purpose | Who uses it |
 |---|---|---|
 | [kata](#kata) | Local-first issue ledger | Agents + human |
 | [roborev](#roborev) | Continuous AI code review | Agents + human |
 | [kwt](#kwt) | Git worktree manager | Agents + human |
+| [engram](#engram) | Persistent memory management | Agents + human |
 | [ghosthub](#ghosthub) | Native terminal multiplexer | Human only |
 
 ---
@@ -193,6 +194,83 @@ Agents do not interact with Ghosthub directly. Worktrees created by kwt (whether
 
 ---
 
+## engram
+
+**[GitHub](https://github.com/askvinni/engram)**
+
+engram is a memory management system for AI-assisted development. It captures institutional knowledge — architectural decisions, discovered gotchas, recurring patterns — from completed work and surfaces it automatically in future Claude sessions. Without it, agents start every session blank and repeat the same mistakes.
+
+### Why it exists
+
+SaaS context tools pass a summary into each session. engram instead writes durable, structured memory files into the repo itself, versioned alongside the code, with routing conditions so agents self-select only the files relevant to what they're working on.
+
+### Installation
+
+```sh
+cargo install --git https://github.com/askvinni/engram
+# Requires: Rust (stable), gh CLI authenticated, Claude Code
+```
+
+### Setup per repo
+
+```sh
+cd my-repo
+engram init    # creates .engram/, ensures GitHub labels, installs Claude Code skills
+```
+
+Re-run `engram init` after upgrading to sync skills.
+
+### Core workflow
+
+```sh
+# 1. Start work: create a plan issue (why, approach, acceptance criteria)
+engram plan new "Replace auth middleware"
+
+# 2. Work normally on a branch; open a PR with "closes #N" in the body
+
+# 3. After merging: synthesize learnings into memory files and close the issue
+engram plan land <issue-number>
+
+# Memory files auto-inject into CLAUDE.md for all future sessions
+```
+
+### Key commands
+
+```sh
+engram plan new <title>       # create a GitHub issue as a plan
+engram plan land <N>          # synthesize learnings after merge, close issue + branch
+engram plan learn <N>         # generate memory files without closing the issue
+engram plan learn --all       # batch-process all closed issues
+engram plan list              # show open plan issues
+engram plan status            # show linked issue/PR for the current branch
+engram compact                # audit and remove low-quality or stale memory files
+engram objective new/plan/view  # track multi-PR work under a shared goal
+engram doctor                 # verify dependencies and config
+```
+
+### Memory categories
+
+| Category | What gets stored |
+|---|---|
+| `patterns/` | Recurring solutions and idioms discovered during implementation |
+| `tripwires/` | Bugs, gotchas, and approaches that failed — with reasons |
+| `architecture/` | Structural decisions and their rationale |
+| `testing/` | Test strategies, fixtures, and codebase constraints |
+
+Each memory file includes `read_when` routing conditions so agents load only what's relevant.
+
+### Claude Code skills
+
+- `/engram-plan <title>` — guided plan drafting with source file context
+- `/engram-learn` — memory review and workflow guidance
+- `/engram-memory` — navigate and evaluate memory files
+
+### Agent contract
+
+See [AGENTS.md](./AGENTS.md#engram--memory-management) for the condensed agent contract.
+
+---
+
 ## Tackling a big issue end to end
 
 This walkthrough covers a substantial piece of work — say, refactoring authentication across several services. Each step is labeled **[Human]** or **[Agent]** to make ownership explicit. Steps marked **[Auto]** happen without anyone asking.
@@ -210,7 +288,7 @@ uv run setup.py --global-only   # tools + hooks only (first time on a new machin
 uv run setup.py --repo-only     # initialise a specific repo (run from that repo's root)
 ```
 
-`setup.py` is idempotent — re-running it is safe at any time. It installs kata, roborev, and kwt if missing; configures two global Claude Code Stop hooks; and when run from a git repo, runs `kata init`, `roborev init`, and wires up agent hooks for that repo.
+`setup.py` is idempotent — re-running it is safe at any time. It installs kata, roborev, kwt, and engram if missing; configures global Claude Code Stop hooks; and when run from a git repo, runs `kata init`, `roborev init`, `engram init`, and wires up agent hooks for that repo.
 
 After repo setup, every commit triggers a background AI review automatically — you don't have to think about it again. The agent will be shown any open review findings before it finishes a session.
 
@@ -440,6 +518,10 @@ roborev (continuous review)
 kata close (evidence-based)
     │   commits, test results, and review passage required as evidence
     ▼
+engram plan land (memory synthesis)
+    │   learnings extracted into .engram/memory/ and injected into CLAUDE.md
+    │   future sessions load relevant patterns, tripwires, and architecture notes
+    ▼
 ghosthub (human visibility)
         human watches all sessions, worktrees, and remote machines in one place
 ```
@@ -451,4 +533,5 @@ ghosthub (human visibility)
 - kata agent guide: `kata quickstart`
 - roborev agent guide: `roborev quickstart` (in a repo)
 - kwt docs: [kwt.sh/docs](https://kwt.sh/docs) (all pages available as `.md` at same path)
+- engram docs: [github.com/askvinni/engram](https://github.com/askvinni/engram)
 - Agent contracts for this environment: [AGENTS.md](./AGENTS.md)

@@ -1,8 +1,8 @@
 # Agentic Workflow Contracts
 
 This file defines operating contracts for agents working in this environment.
-Four kenn.io tools are active: **kata** (issue ledger), **roborev** (code review),
-**kwt** (git worktree manager), and **ghosthub** (terminal multiplexer — human-only).
+Four kenn.io tools and engram are active: **kata** (issue ledger), **roborev** (code review),
+**kwt** (git worktree manager), **engram** (memory management), and **ghosthub** (terminal multiplexer — human-only).
 
 ---
 
@@ -205,6 +205,51 @@ PR worktrees are "protected" — they require explicit `kwt pr attach` rather th
 - Prefer `kwt exec` over `cd` + command to keep work scoped to the worktree.
 - Use `--json` output when consuming kwt data programmatically.
 - Do not `kwt remove --force` without confirming the user wants uncommitted work discarded.
+
+---
+
+## engram — Memory Management
+
+`engram` captures institutional knowledge from completed work and makes it available
+to future agent sessions automatically. Memory files live in `.engram/memory/` inside
+the repo and are injected into `CLAUDE.md` with routing conditions so agents load
+only the files relevant to what they're working on.
+
+### Core workflow
+
+1. Before starting substantial work, create a plan issue: `engram plan new <title>`
+2. Work on the branch, open a PR with `closes #N` in the body
+3. After the PR merges, run `engram plan land <N>` to synthesize learnings
+
+```sh
+engram plan new "Fix session token storage"    # create a plan issue on GitHub
+engram plan land <issue-number>                # synthesize memory files, close issue
+engram plan learn <issue-number>               # generate memory without closing
+engram plan learn --all                        # process all closed plan issues
+engram plan list                               # show open plans
+engram plan status                             # show issue/PR for current branch
+engram compact                                 # prune stale or low-quality memory files
+engram doctor                                  # verify dependencies and config
+```
+
+### Memory categories
+
+| Directory | What it contains |
+|---|---|
+| `patterns/` | Recurring solutions and idioms discovered during implementation |
+| `tripwires/` | Bugs, gotchas, and approaches that failed — with reasons |
+| `architecture/` | Structural decisions and their rationale |
+| `testing/` | Test strategies, fixtures, and codebase constraints |
+
+Each file includes a `read_when` condition. Agents must honor these conditions and
+load only memory files relevant to the current task.
+
+### Do not
+
+- Skip `engram plan new` for substantial, multi-commit pieces of work — the plan
+  is what gives `engram plan land` enough context to extract good learnings.
+- Run `engram plan land` before the PR is merged — landing is a post-merge step.
+- Manually edit files under `.engram/memory/` — use `engram compact` to prune.
 
 ---
 

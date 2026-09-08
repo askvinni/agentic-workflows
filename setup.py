@@ -6,12 +6,12 @@
 # ]
 # ///
 #
-# Configures kenn.io agentic workflow tooling for this machine and/or a repo.
+# Configures kenn.io agentic workflow tooling and engram for this machine and/or a repo.
 #
 # Usage:
 #   ./setup.py                  global + repo init (if cwd is a git repo)
 #   ./setup.py --global-only    tools and Claude Code hooks only
-#   ./setup.py --repo-only      repo init only (kata + roborev in cwd)
+#   ./setup.py --repo-only      repo init only (kata + roborev + engram in cwd)
 
 import argparse
 import difflib
@@ -113,6 +113,32 @@ def add_claude_stop_hook(command: str) -> bool:
         f.write("\n")
 
     return True
+
+
+def sync_skills() -> None:
+    """
+    Symlink every skill directory under skills/ into ~/.claude/skills/.
+    Idempotent — re-running updates stale symlinks and skips current ones.
+    """
+    skills_src = Path(__file__).parent / "skills"
+    if not skills_src.exists():
+        skip("no skills/ directory found — skipping skill sync")
+        return
+
+    skills_dst = Path.home() / ".claude" / "skills"
+    skills_dst.mkdir(parents=True, exist_ok=True)
+
+    for skill_dir in sorted(skills_src.iterdir()):
+        if not skill_dir.is_dir():
+            continue
+        link = skills_dst / skill_dir.name
+        if link.is_symlink() and link.resolve() == skill_dir.resolve():
+            skip(f"skill already linked: {skill_dir.name}")
+        else:
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            link.symlink_to(skill_dir.resolve())
+            ok(f"skill linked: {skill_dir.name} → ~/.claude/skills/{skill_dir.name}")
 
 
 def sync_agent_contract() -> None:
@@ -229,6 +255,16 @@ if do_global:
     else:
         warn("kwt not installed — Go is required ([dim]brew install go[/]) or use the version bundled in Ghosthub.app")
 
+    # ── engram ────────────────────────────────────────────────────────────────
+    if cmd_exists("engram"):
+        skip(f"engram already installed ({cmd_version('engram', '--version')})")
+    elif cmd_exists("cargo"):
+        console.print("  installing engram via cargo…")
+        run(["cargo", "install", "--git", "https://github.com/askvinni/engram"])
+        ok("engram installed")
+    else:
+        warn("engram not installed — Rust is required ([dim]brew install rust[/] or https://rustup.rs)")
+
     # ── roborev daemon ────────────────────────────────────────────────────────
     step("Ensuring roborev daemon is running")
     result = run(["roborev", "status"], check=False, capture=True)
@@ -265,6 +301,10 @@ if do_global:
     step("Syncing agent contract to global Claude memory")
     sync_agent_contract()
 
+    # ── global skills ─────────────────────────────────────────────────────────
+    step("Syncing skills to ~/.claude/skills/")
+    sync_skills()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE 2 — per-repo initialisation
@@ -277,6 +317,8 @@ if do_repo:
             warn("current directory is not a git repo — skipping repo init (re-run from a repo root, or use --repo-only)")
         else:
             die("not inside a git repository")
+    elif git_repo_root() == Path(__file__).parent.resolve():
+        skip("repo init skipped — running from the agentic-workflows directory itself (run from a target repo root, or use --global-only)")
     else:
         repo_root = git_repo_root()
         repo_name = repo_root.name
@@ -307,9 +349,20 @@ if do_repo:
         run(["roborev", "agent-hook", "install"])
         ok("roborev agent-hook installed")
 
+        # ── engram ────────────────────────────────────────────────────────────
+        engram_dir = repo_root / ".engram"
+        if engram_dir.exists():
+            skip("engram already initialised (.engram/ exists)")
+        elif cmd_exists("engram"):
+            console.print("  running engram init…")
+            run(["engram", "init"])
+            ok("engram initialised (memory system + Claude Code skills installed)")
+        else:
+            warn("engram not installed — skipping engram init (install Rust and re-run)")
+
         console.print()
         console.print(f"  [bold]Repo ready.[/] Every commit will now be reviewed automatically.")
-        console.print(f"  [dim]Monitor: roborev tui   |   Issues: kata tui[/]")
+        console.print(f"  [dim]Monitor: roborev tui   |   Issues: kata tui   |   Memory: engram plan list[/]")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -321,6 +374,7 @@ console.print("  [bold]Global[/]")
 console.print(f"    kata:     {cmd_version('kata', 'version') or '[yellow]check installation[/]'}")
 console.print(f"    roborev:  {cmd_version('roborev', 'version') or '[yellow]check installation[/]'}")
 console.print(f"    kwt:      {cmd_version('kwt', 'version') or '[yellow]not in PATH — install separately or use Ghosthub bundle[/]'}")
+console.print(f"    engram:   {cmd_version('engram', '--version') or '[yellow]not installed — requires Rust (rustup.rs)[/]'}")
 console.print()
 console.print("  [bold]Next steps[/]")
 script_path = Path(__file__).resolve()
