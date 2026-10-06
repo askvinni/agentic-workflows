@@ -127,8 +127,6 @@ go install go.kenn.io/kwt/cmd/kwt@latest
 # Also bundled inside Ghosthub.app
 ```
 
-> **Note:** `kwt` is not currently in PATH on this machine. Install it or use the version inside `/Applications/Ghosthub.app/Contents/MacOS/KwtRemote`.
-
 ### Core concept
 
 Running `kwt` inside any git repo registers it automatically. The dashboard shows all registered projects and their linked worktrees.
