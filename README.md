@@ -326,6 +326,30 @@ kwt open refactor/auth-middleware    # launches a dedicated tmux session
 
 Ghosthub shows the new session in its sidebar immediately. For parallel agents, each gets its own branch and worktree — kwt enforces that no two sessions share a directory.
 
+#### Or: dispatch issues straight to background agents
+
+`kdispatch` (in `bin/`, linked to `~/.local/bin` by `setup.py`) does the whole hand-off in one command. It claims the issue, creates the branch, opens a draft PR, attaches a kwt worktree, starts the tmux workspace in the background, and launches Claude in auto mode with the issue as its prompt:
+
+```sh
+kdispatch                       # pick from the repo's open, unclaimed issues
+kdispatch abc4                  # one issue, or a parent: its children as a stack of PRs
+kdispatch abc4 d4ex             # several independent issues
+kdispatch --stack abc4 d4ex     # several issues stacked in the order given
+kdispatch abc4 --dry-run        # show the plan only
+```
+
+Run from a terminal, it asks which issues to dispatch whenever there's more than one candidate, then confirms the plan. Sessions show up in Ghosthub without taking over your current window.
+
+Branch names and PR titles default to `<ref>-<title-slug>` and the issue title. Repos with naming conventions set templates in git config (per repo, or `--global` for your default), filled from the kata issue and its metadata:
+
+```sh
+git config kdispatch.branch  '{meta[type]}/{meta[jira]}/{slug}'   # fields: {short_id} {ref} {title} {slug} {meta[key]}
+git config kdispatch.prTitle '[{meta[jira]}] {title}'
+kata meta set abc4 jira DPAS-1234                                 # metadata the template needs
+```
+
+If an issue lacks a key the template uses, `kdispatch` stops at planning (so `--dry-run` shows it) and prints the `kata meta set` command to fix it. Re-running is safe: existing claims, branches, PRs, worktrees and sessions are reused. Agents use it through the `/kata-worktree-dispatch` skill.
+
 ### 4. Agent picks up and works `[Agent]`
 
 Inside Claude Code (or any agent configured against this environment), the agent follows the contract in `AGENTS.md`:

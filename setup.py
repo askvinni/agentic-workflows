@@ -141,6 +141,37 @@ def sync_skills() -> None:
             ok(f"skill linked: {skill_dir.name} → ~/.claude/skills/{skill_dir.name}")
 
 
+def sync_bin() -> None:
+    """
+    Symlink every executable under bin/ into ~/.local/bin/.
+    Idempotent — re-running updates stale symlinks and skips current ones.
+    """
+    bin_src = Path(__file__).parent / "bin"
+    if not bin_src.exists():
+        skip("no bin/ directory found — skipping CLI sync")
+        return
+
+    bin_dst = Path.home() / ".local" / "bin"
+    bin_dst.mkdir(parents=True, exist_ok=True)
+
+    for tool in sorted(bin_src.iterdir()):
+        if not tool.is_file() or not os.access(tool, os.X_OK):
+            continue
+        link = bin_dst / tool.name
+        if link.is_symlink() and link.resolve() == tool.resolve():
+            skip(f"command already linked: {tool.name}")
+        elif link.exists() and not link.is_symlink():
+            warn(f"{link} exists and is not a symlink — leaving it alone")
+        else:
+            if link.is_symlink():
+                link.unlink()
+            link.symlink_to(tool.resolve())
+            ok(f"command linked: {tool.name} → ~/.local/bin/{tool.name}")
+
+    if str(bin_dst) not in os.environ.get("PATH", "").split(os.pathsep):
+        warn(f"add [dim]{bin_dst}[/] to your PATH to use these commands")
+
+
 def sync_agent_contract() -> None:
     """
     Copy AGENTS.md to ~/.claude/agentic-workflows.md and ensure ~/.claude/CLAUDE.md
@@ -304,6 +335,10 @@ if do_global:
     # ── global skills ─────────────────────────────────────────────────────────
     step("Syncing skills to ~/.claude/skills/")
     sync_skills()
+
+    # ── global commands ───────────────────────────────────────────────────────
+    step("Linking commands to ~/.local/bin/")
+    sync_bin()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
