@@ -14,6 +14,12 @@
 # Re-running is safe: claims, branches, PRs, worktrees and sessions that already
 # exist are reused, and Claude is only launched into a pane sitting at a shell prompt.
 #
+# Branch names and PR titles follow per-repo templates in git config (with --global
+# as the fallback), filled from the kata issue: {short_id}, {ref}, {title}, {slug}
+# and {meta[key]} for issue metadata (`kata meta set <ref> <key> <value>`):
+#   git config kdispatch.branch  '{meta[type]}/{meta[jira]}/{slug}'   # default: {short_id}-{slug}
+#   git config kdispatch.prTitle '[{meta[jira]}] {title}'             # default: {title}
+#
 # KDISPATCH_CLAUDE overrides the command launched in each workspace (default: claude).
 
 import json
@@ -70,6 +76,7 @@ class Issue:
     title: str
     status: str
     owner: str | None
+    meta: dict = field(default_factory=dict)
     children: list[str] = field(default_factory=list)
 
 
@@ -98,7 +105,7 @@ def load_issue(ref: str, cwd: Path) -> Issue:
     qualified = next((end["qualified_id"] for l in links for end in (l["from"], l["to"])
                       if end["uid"] == issue["uid"]), ref)
     return Issue(ref=qualified, short_id=issue["short_id"], title=issue["title"], status=issue["status"],
-                 owner=issue.get("owner"), children=[l["from"]["qualified_id"] for l in children])
+                 owner=issue.get("owner"), meta=issue.get("metadata") or {}, children=[l["from"]["qualified_id"] for l in children])
 
 
 def kata_actor() -> str:
@@ -112,6 +119,7 @@ def kata_actor() -> str:
 class Target:
     issue: Issue
     branch: str
+    pr_title: str
     base: str
     pr_url: str = ""
     session: str = ""
@@ -120,10 +128,24 @@ class Target:
     error: str = ""
 
 
-def branch_name(issue: Issue) -> str:
+def render(template: str, issue: Issue) -> str:
+    class Meta(dict):
+        def __missing__(self, key):
+            raise DispatchError(f"{issue.short_id}: template `{template}` needs metadata '{key}' "
+                                f"(kata meta set {issue.ref} {key} <value>)")
+
     slug = re.sub(r"[^a-z0-9 -]", "", issue.title.lower()).strip().replace(" ", "-")
     slug = re.sub(r"-{2,}", "-", slug)[:40].rstrip("-")
-    return f"{issue.short_id}-{slug}"
+    try:
+        return template.format(short_id=issue.short_id, ref=issue.ref, title=issue.title, slug=slug,
+                               meta=Meta(issue.meta))
+    except (KeyError, IndexError, ValueError) as e:
+        raise DispatchError(f"bad template `{template}`: {e!r}") from None
+
+
+def git_config(repo: Path, key: str, default: str) -> str:
+    proc = run(["git", "config", "--get", key], repo, check=False)
+    return proc.stdout.strip() or default
 
 
 def parse_selection(raw: str, n: int) -> list[int]:
@@ -161,7 +183,8 @@ def plan(args, repo: Path, default: str) -> tuple[list[Target], bool, list[str]]
             raise DispatchError("no issue refs given (interactive selection needs a terminal)")
         listed = kata_json(["list", "--unowned"], repo).get("issues") or []
         roots = [Issue(ref=i["qualified_id"], short_id=i["short_id"], title=i["title"],
-                       status=i["status"], owner=i.get("owner")) for i in listed]
+                       status=i["status"], owner=i.get("owner"), meta=i.get("metadata") or {})
+                 for i in listed]
         if not roots:
             raise DispatchError("no open, unclaimed issues in this repo's kata project")
     else:
@@ -194,9 +217,14 @@ def plan(args, repo: Path, default: str) -> tuple[list[Target], bool, list[str]]
         skipped += [f"{i.short_id}: beyond --count" for i in issues[args.count:]]
         issues = issues[: args.count]
 
+    branch_tpl = git_config(repo, "kdispatch.branch", "{short_id}-{slug}")
+    title_tpl = git_config(repo, "kdispatch.prTitle", "{title}")
     targets, base = [], default
     for i in issues:
-        targets.append(Target(i, branch_name(i), base))
+        branch = render(branch_tpl, i)
+        if run(["git", "check-ref-format", "--branch", branch], repo, check=False).returncode != 0:
+            raise DispatchError(f"{i.short_id}: `{branch}` is not a valid branch name")
+        targets.append(Target(i, branch, render(title_tpl, i), base))
         if stacked:
             base = targets[-1].branch
     return targets, stacked, skipped
@@ -232,7 +260,7 @@ def open_draft_pr(repo: Path, t: Target, stacked: bool) -> None:
         return
     body = f"Work in progress for kata issue `{t.issue.ref}`." + (f" Stacked on `{t.base}`." if stacked else "")
     t.pr_url = out(["gh", "pr", "create", "--draft", "--head", t.branch, "--base", t.base,
-                    "--title", t.issue.title, "--body", body], repo).splitlines()[-1]
+                    "--title", t.pr_title, "--body", body], repo).splitlines()[-1]
 
 
 # ── kwt / tmux / claude ──────────────────────────────────────────────────────
@@ -357,6 +385,8 @@ def dispatch(args) -> int:
     log(f"Plan ({'stacked' if stacked else 'independent'}, default branch `{default}`):")
     for t in targets:
         log(f"  {t.issue.short_id}  {t.branch}  ← {t.base}")
+        if t.pr_title != t.issue.title:
+            log(f"        PR: {t.pr_title}")
     for s in skipped:
         log(f"  skip {s}")
     if args.dry_run:

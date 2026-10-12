@@ -31,6 +31,10 @@ Claude, `-C <repo>` to run against another repo.
 Run without a terminal (as you do), `kdispatch` never prompts: always pass refs, narrow
 with `--only`, and confirm with `--yes`.
 
+Branch names and PR titles come from the repo's `kdispatch.branch` / `kdispatch.prTitle`
+git config templates. If `--dry-run` reports missing issue metadata (e.g. a Jira key), ask
+the user for the value and set it with the `kata meta set` command it prints. Don't invent it.
+
 ## Instructions
 
 1. Run from the repository the issues belong to. Preview the plan, which changes nothing:
