@@ -37,6 +37,8 @@ from types import SimpleNamespace
 import click
 
 SHELLS = {"zsh", "bash", "fish", "sh", "dash", "ksh"}
+# Seconds to wait for Claude to replace the shell in a pane, then to stay there.
+LAUNCH_TIMEOUT, LAUNCH_SETTLE = 15, 3
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "kdispatch"
 # kwt is often only a shell alias to the copy bundled with Ghosthub.
 GHOSTHUB_KWT = "/Applications/Ghosthub.app/Contents/Helpers/kwt"
@@ -313,11 +315,15 @@ def build_prompt(repo: Path, t: Target, stacked: bool, default: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def launch_claude(repo: Path, t: Target, prompt: str) -> None:
+def launch_claude(repo: Path, t: Target, worktree: str, prompt: str) -> None:
     # kwt (and Ghosthub) run tmux with TMUX_TMPDIR unset; honouring it here would
     # address a different server than the one holding the workspace.
     tmux = ["env", "-u", "TMUX_TMPDIR", "tmux", "-L", t.socket]
-    current = out([*tmux, "display-message", "-p", "-t", t.session, "#{pane_current_command}"], repo)
+
+    def pane_command() -> str:
+        return out([*tmux, "display-message", "-p", "-t", t.session, "#{pane_current_command}"], repo)
+
+    current = pane_command()
     if current not in SHELLS:
         t.launched = f"already running ({current})"
         return
@@ -327,9 +333,25 @@ def launch_claude(repo: Path, t: Target, prompt: str) -> None:
     prompt_file = STATE_DIR / f"{t.issue.ref.replace('#', '-')}.md"
     prompt_file.write_text(prompt)
     claude = os.environ.get("KDISPATCH_CLAUDE", "claude")
-    cmd = f'{claude} --permission-mode auto "$(cat {shlex.quote(str(prompt_file))})"'
+    # The pane's shell can start outside the worktree: it inherits the tmux
+    # server's cwd, which may be a since-deleted directory, and Claude refuses
+    # to start there. cd explicitly rather than trusting the pane.
+    cmd = (f'cd {shlex.quote(worktree)} && '
+           f'{claude} --permission-mode auto "$(cat {shlex.quote(str(prompt_file))})"')
     run([*tmux, "send-keys", "-t", t.session, "-l", cmd], repo)
     run([*tmux, "send-keys", "-t", t.session, "Enter"], repo)
+
+    # Keystrokes landing is not a launch: wait for Claude to take over the pane
+    # and still be there a moment later, so an immediate exit is reported.
+    deadline = time.monotonic() + LAUNCH_TIMEOUT
+    while pane_command() in SHELLS and time.monotonic() < deadline:
+        time.sleep(0.5)
+    if pane_command() not in SHELLS:
+        time.sleep(LAUNCH_SETTLE)
+    if pane_command() in SHELLS:
+        tail = out([*tmux, "capture-pane", "-p", "-t", t.session], repo).strip().splitlines()[-5:]
+        raise DispatchError("Claude exited right after launch; pane shows:\n        "
+                            + "\n        ".join(tail))
     t.launched = "launched"
 
 
@@ -427,9 +449,10 @@ def dispatch(args) -> int:
     # here are per-issue.
     for t in targets:
         try:
-            start_session(repo, t, ensure_worktree(repo, t))
+            worktree = ensure_worktree(repo, t)
+            start_session(repo, t, worktree)
             if not args.no_launch:
-                launch_claude(repo, t, build_prompt(repo, t, stacked, default))
+                launch_claude(repo, t, worktree, build_prompt(repo, t, stacked, default))
         except DispatchError as e:
             t.error = str(e)
 
