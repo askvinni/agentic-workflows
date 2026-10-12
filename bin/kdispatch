@@ -6,22 +6,13 @@
 #
 # kdispatch — dispatch kata issues to background kwt workspaces running Claude.
 #
-# For every issue it dispatches it: claims the issue, creates a branch with an
-# empty "wip" commit (without checking anything out), pushes it, opens a draft PR,
-# attaches a kwt worktree, starts the tmux workspace detached, and launches
-# `claude --permission-mode auto` in it with the issue as the prompt.
+# For each issue: claim it, create a branch holding one empty "wip" commit (without
+# checking anything out), push it, open a draft PR, attach a kwt worktree, start its
+# tmux workspace detached, and launch `claude --permission-mode auto` there with the
+# issue as the prompt. See `kdispatch --help` for usage.
 #
-# Usage:
-#   kdispatch                     pick from the repo's open, unclaimed issues
-#   kdispatch <ref>               issue without children → dispatch just that issue
-#                                 issue with children    → dispatch its children as a stack
-#   kdispatch <ref> <ref> ...     several independent issues, each based on the default branch
-#   kdispatch --stack <ref> ...   several issues stacked in the order given
-#
-# In a terminal, whenever there is more than one candidate issue it asks which to
-# dispatch. Run it from the repository the issues belong to. Re-running is safe: claims,
-# branches, PRs, worktrees and sessions that already exist are reused, and Claude
-# is only launched into a session whose pane is sitting at a shell prompt.
+# Re-running is safe: claims, branches, PRs, worktrees and sessions that already
+# exist are reused, and Claude is only launched into a pane sitting at a shell prompt.
 #
 # KDISPATCH_CLAUDE overrides the command launched in each workspace (default: claude).
 
@@ -40,8 +31,10 @@ from types import SimpleNamespace
 import click
 
 SHELLS = {"zsh", "bash", "fish", "sh", "dash", "ksh"}
-GHOSTHUB_KWT = "/Applications/Ghosthub.app/Contents/Helpers/kwt"
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "kdispatch"
+# kwt is often only a shell alias to the copy bundled with Ghosthub.
+GHOSTHUB_KWT = "/Applications/Ghosthub.app/Contents/Helpers/kwt"
+KWT = GHOSTHUB_KWT if not shutil.which("kwt") and os.access(GHOSTHUB_KWT, os.X_OK) else "kwt"
 
 
 class DispatchError(Exception):
@@ -49,7 +42,10 @@ class DispatchError(Exception):
 
 
 def run(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.CompletedProcess:
-    proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    try:
+        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        raise DispatchError(f"`{args[0]}` not found on PATH") from None
     if check and proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip()
         raise DispatchError(f"`{shlex.join(args)}` failed: {detail}")
@@ -94,27 +90,15 @@ def kata_json(args: list[str], cwd: Path) -> dict:
 
 def load_issue(ref: str, cwd: Path) -> Issue:
     data = kata_json(["show", ref], cwd)
-    issue = data["issue"]
+    issue, links = data["issue"], data.get("links") or []
     # Children are links of type "parent" pointing *at* this issue; link ids keep
     # them in creation order, which is how objective children are numbered.
-    child_links = sorted(
-        (l for l in data.get("links") or []
-         if l.get("type") == "parent" and l["to"]["uid"] == issue["uid"]),
-        key=lambda l: l["id"],
-    )
-    qualified = ref
-    for l in data.get("links") or []:
-        for end in (l["from"], l["to"]):
-            if end["uid"] == issue["uid"]:
-                qualified = end["qualified_id"]
-    return Issue(
-        ref=qualified,
-        short_id=issue["short_id"],
-        title=issue["title"],
-        status=issue["status"],
-        owner=issue.get("owner"),
-        children=[l["from"]["qualified_id"] for l in child_links],
-    )
+    children = sorted((l for l in links if l.get("type") == "parent" and l["to"]["uid"] == issue["uid"]),
+                      key=lambda l: l["id"])
+    qualified = next((end["qualified_id"] for l in links for end in (l["from"], l["to"])
+                      if end["uid"] == issue["uid"]), ref)
+    return Issue(ref=qualified, short_id=issue["short_id"], title=issue["title"], status=issue["status"],
+                 owner=issue.get("owner"), children=[l["from"]["qualified_id"] for l in children])
 
 
 def kata_actor() -> str:
@@ -128,36 +112,30 @@ def kata_actor() -> str:
 class Target:
     issue: Issue
     branch: str
-    base: str = ""
+    base: str
     pr_url: str = ""
-    worktree: str = ""
     session: str = ""
     socket: str = ""
-    launched: str = ""   # "launched" | "already running" | ""
+    launched: str = ""   # "launched" | "already running (…)" | ""
     error: str = ""
 
 
-def slugify(title: str) -> str:
-    slug = re.sub(r"[^a-z0-9 -]", "", title.lower()).strip().replace(" ", "-")
-    slug = re.sub(r"-{2,}", "-", slug)
-    return slug[:40].rstrip("-")
-
-
 def branch_name(issue: Issue) -> str:
-    return f"{issue.short_id}-{slugify(issue.title)}"
+    slug = re.sub(r"[^a-z0-9 -]", "", issue.title.lower()).strip().replace(" ", "-")
+    slug = re.sub(r"-{2,}", "-", slug)[:40].rstrip("-")
+    return f"{issue.short_id}-{slug}"
 
 
 def parse_selection(raw: str, n: int) -> list[int]:
     if not raw.strip():
         return list(range(n))
-    picked: list[int] = []
+    picked: set[int] = set()
     for part in raw.replace(" ", "").split(","):
         lo, _, hi = part.partition("-")
         for i in range(int(lo), int(hi or lo) + 1):
             if not 1 <= i <= n:
                 raise ValueError(f"{i} is out of range")
-            if i - 1 not in picked:
-                picked.append(i - 1)
+            picked.add(i - 1)
     return sorted(picked)
 
 
@@ -173,19 +151,10 @@ def pick(issues: list[Issue]) -> list[Issue]:
             log(f"  invalid selection: {e}")
 
 
-def plan(args, repo: Path) -> tuple[list[Target], bool, list[str]]:
-    """Return (targets in dispatch order, stacked?, skipped-ref notes)."""
+def plan(args, repo: Path, default: str) -> tuple[list[Target], bool, list[str]]:
+    """Return (targets in dispatch order with their bases, stacked?, skipped-ref notes)."""
     me = kata_actor()
     skipped: list[str] = []
-
-    def eligible(issue: Issue) -> bool:
-        if issue.status != "open":
-            skipped.append(f"{issue.short_id}: {issue.status}")
-            return False
-        if issue.owner and issue.owner != me:
-            skipped.append(f"{issue.short_id}: owned by {issue.owner}")
-            return False
-        return True
 
     if not args.refs:
         if not args.interactive:
@@ -204,12 +173,17 @@ def plan(args, repo: Path) -> tuple[list[Target], bool, list[str]]:
         stacked = args.stack
         candidates = roots
 
-    issues = [i for i in candidates if eligible(i)]
+    issues = []
+    for i in candidates:
+        if i.status != "open":
+            skipped.append(f"{i.short_id}: {i.status}")
+        elif i.owner and i.owner != me:
+            skipped.append(f"{i.short_id}: owned by {i.owner}")
+        else:
+            issues.append(i)
     if args.only:
         wanted = {r.split("#")[-1] for r in args.only.split(",")}
-        for i in issues:
-            if i.short_id not in wanted:
-                skipped.append(f"{i.short_id}: not in --only")
+        skipped += [f"{i.short_id}: not in --only" for i in issues if i.short_id not in wanted]
         issues = [i for i in issues if i.short_id in wanted]
     if args.interactive and len(issues) > 1 and not args.only and args.count is None:
         chosen = pick(issues)
@@ -219,7 +193,13 @@ def plan(args, repo: Path) -> tuple[list[Target], bool, list[str]]:
     if args.count is not None:
         skipped += [f"{i.short_id}: beyond --count" for i in issues[args.count:]]
         issues = issues[: args.count]
-    return [Target(i, branch_name(i)) for i in issues], stacked, skipped
+
+    targets, base = [], default
+    for i in issues:
+        targets.append(Target(i, branch_name(i), base))
+        if stacked:
+            base = targets[-1].branch
+    return targets, stacked, skipped
 
 
 # ── git / gh ─────────────────────────────────────────────────────────────────
@@ -232,18 +212,13 @@ def default_branch(repo: Path) -> str:
     return out(["gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], repo)
 
 
-def branch_exists(repo: Path, branch: str) -> bool:
-    return run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], repo, check=False).returncode == 0
-
-
 def create_branch(repo: Path, t: Target, base_rev: str) -> None:
     """Create t.branch as one empty commit on top of base_rev, without a checkout."""
-    if branch_exists(repo, t.branch):
+    if run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{t.branch}"], repo, check=False).returncode == 0:
         log(f"  branch {t.branch} exists, reusing it")
         return
     tree = out(["git", "rev-parse", f"{base_rev}^{{tree}}"], repo)
-    msg = f"wip: {t.issue.short_id} {t.issue.title}"
-    commit = out(["git", "commit-tree", tree, "-p", base_rev, "-m", msg], repo)
+    commit = out(["git", "commit-tree", tree, "-p", base_rev, "-m", f"wip: {t.issue.short_id} {t.issue.title}"], repo)
     run(["git", "branch", t.branch, commit], repo)
 
 
@@ -255,41 +230,24 @@ def open_draft_pr(repo: Path, t: Target, stacked: bool) -> None:
         if existing[0]["baseRefName"] != t.base:
             log(f"  warning: existing PR {t.pr_url} targets {existing[0]['baseRefName']}, not {t.base}")
         return
-    body = f"Work in progress for kata issue `{t.issue.ref}`."
-    if stacked:
-        body += f" Stacked on `{t.base}`."
+    body = f"Work in progress for kata issue `{t.issue.ref}`." + (f" Stacked on `{t.base}`." if stacked else "")
     t.pr_url = out(["gh", "pr", "create", "--draft", "--head", t.branch, "--base", t.base,
                     "--title", t.issue.title, "--body", body], repo).splitlines()[-1]
-
-
-def gh_stack_available(repo: Path) -> bool:
-    proc = run(["gh", "extension", "list"], repo, check=False)
-    return any(line.split("\t")[0].strip() == "gh stack" for line in proc.stdout.splitlines())
 
 
 # ── kwt / tmux / claude ──────────────────────────────────────────────────────
 
 
-def find_kwt() -> str | None:
-    # kwt is often only a shell alias to the copy bundled with Ghosthub.
-    if shutil.which("kwt"):
-        return "kwt"
-    return GHOSTHUB_KWT if os.access(GHOSTHUB_KWT, os.X_OK) else None
-
-
-KWT = find_kwt() or "kwt"
-
-
-def ensure_worktree(repo: Path, t: Target) -> None:
+def ensure_worktree(repo: Path, t: Target) -> str:
     proc = run([KWT, "get", t.branch], repo, check=False)
     path = proc.stdout.strip()
     if proc.returncode != 0 or not path or not Path(path).is_dir():
         run([KWT, "add", t.branch, "--no-launch"], repo)
         path = out([KWT, "get", t.branch], repo)
-    t.worktree = path
+    return path
 
 
-def start_session(repo: Path, t: Target) -> None:
+def start_session(repo: Path, t: Target, worktree: str) -> None:
     # --start-session is the only mode of `kwt open` that never attaches the
     # calling terminal. kwt runs its own tmux server, so the endpoint comes from
     # its JSON rather than from `tmux ls`.
@@ -297,7 +255,7 @@ def start_session(repo: Path, t: Target) -> None:
     # failed: fork failed"); --start-session is idempotent, so retry.
     for attempt in range(3):
         try:
-            endpoint = json.loads(out([KWT, "open", t.worktree, "--start-session", "--json"], repo))
+            endpoint = json.loads(out([KWT, "open", worktree, "--start-session", "--json"], repo))
             break
         except DispatchError:
             if attempt == 2:
@@ -309,11 +267,10 @@ def start_session(repo: Path, t: Target) -> None:
 
 
 def build_prompt(repo: Path, t: Target, stacked: bool, default: str) -> str:
-    issue_text = out(["kata", "show", t.issue.ref, "--agent"], repo)
     lines = [
         f"Work on kata issue {t.issue.ref}:",
         "",
-        issue_text,
+        out(["kata", "show", t.issue.ref, "--agent"], repo),
         "",
         "---",
         f"A draft pull request is already open for this branch: {t.pr_url} (base `{t.base}`).",
@@ -328,14 +285,11 @@ def build_prompt(repo: Path, t: Target, stacked: bool, default: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def tmux(socket: str) -> list[str]:
+def launch_claude(repo: Path, t: Target, prompt: str) -> None:
     # kwt (and Ghosthub) run tmux with TMUX_TMPDIR unset; honouring it here would
     # address a different server than the one holding the workspace.
-    return ["env", "-u", "TMUX_TMPDIR", "tmux", "-L", socket]
-
-
-def launch_claude(repo: Path, t: Target, prompt: str) -> None:
-    current = out([*tmux(t.socket), "display-message", "-p", "-t", t.session, "#{pane_current_command}"], repo)
+    tmux = ["env", "-u", "TMUX_TMPDIR", "tmux", "-L", t.socket]
+    current = out([*tmux, "display-message", "-p", "-t", t.session, "#{pane_current_command}"], repo)
     if current not in SHELLS:
         t.launched = f"already running ({current})"
         return
@@ -346,44 +300,22 @@ def launch_claude(repo: Path, t: Target, prompt: str) -> None:
     prompt_file.write_text(prompt)
     claude = os.environ.get("KDISPATCH_CLAUDE", "claude")
     cmd = f'{claude} --permission-mode auto "$(cat {shlex.quote(str(prompt_file))})"'
-    run([*tmux(t.socket), "send-keys", "-t", t.session, "-l", cmd], repo)
-    run([*tmux(t.socket), "send-keys", "-t", t.session, "Enter"], repo)
+    run([*tmux, "send-keys", "-t", t.session, "-l", cmd], repo)
+    run([*tmux, "send-keys", "-t", t.session, "Enter"], repo)
     t.launched = "launched"
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
 
-def print_plan(targets: list[Target], stacked: bool, default: str, skipped: list[str]) -> None:
-    log(f"Plan ({'stacked' if stacked else 'independent'}, default branch `{default}`):")
-    prev = default
-    for t in targets:
-        base = prev if stacked else default
-        log(f"  {t.issue.short_id}  {t.branch}  ← {base}")
-        if stacked:
-            prev = t.branch
-    for s in skipped:
-        log(f"  skip {s}")
-
-
-def report(targets: list[Target], skipped: list[str], as_json: bool) -> None:
-    if as_json:
-        print(json.dumps({
-            "dispatched": [{
-                "ref": t.issue.ref, "title": t.issue.title, "branch": t.branch, "base": t.base,
-                "pr": t.pr_url, "worktree": t.worktree, "session": t.session,
-                "tmux_socket": t.socket, "claude": t.launched, "error": t.error,
-            } for t in targets],
-            "skipped": skipped,
-        }, indent=2))
-        return
+def report(targets: list[Target], skipped: list[str]) -> None:
     for t in targets:
         status = f"ERROR: {t.error}" if t.error else t.launched or "not launched"
-        print(f"{t.issue.short_id}  {t.branch}  ← {t.base}")
-        print(f"      pr: {t.pr_url or '-'}")
-        print(f"      tmux: {t.session or '-'} (socket {t.socket or '-'})  claude: {status}")
+        click.echo(f"{t.issue.short_id}  {t.branch}  ← {t.base}")
+        click.echo(f"      pr: {t.pr_url or '-'}")
+        click.echo(f"      tmux: {t.session or '-'} (socket {t.socket or '-'})  claude: {status}")
     for s in skipped:
-        print(f"skipped {s}")
+        click.echo(f"skipped {s}")
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -395,7 +327,6 @@ def report(targets: list[Target], skipped: list[str], as_json: bool) -> None:
 @click.option("--dry-run", is_flag=True, help="Print the plan and change nothing.")
 @click.option("--yes", "-y", is_flag=True, help="Don't ask for confirmation.")
 @click.option("--no-launch", is_flag=True, help="Set everything up but don't start Claude.")
-@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
 @click.option("-C", "repo", default=".", type=click.Path(exists=True, file_okay=False),
               help="Repository to run in (default: cwd).")
 def main(**opts) -> None:
@@ -403,25 +334,17 @@ def main(**opts) -> None:
 
     With no REFS, pick from the repo's open, unclaimed issues. A ref with
     children dispatches its children as a stack of PRs; several refs are
-    dispatched independently unless --stack is given.
+    dispatched independently unless --stack is given. In a terminal, asks
+    which issues to dispatch whenever there is more than one candidate.
     """
-    args = SimpleNamespace(**opts, interactive=sys.stdin.isatty())
-    sys.exit(dispatch(args))
+    sys.exit(dispatch(SimpleNamespace(**opts, interactive=sys.stdin.isatty())))
 
 
 def dispatch(args) -> int:
-    for tool in ("git", "gh", "kata", "tmux"):
-        if not shutil.which(tool):
-            log(f"kdispatch: `{tool}` not found on PATH")
-            return 1
-    if not find_kwt():
-        log(f"kdispatch: `kwt` not found on PATH or at {GHOSTHUB_KWT}")
-        return 1
-
     try:
         repo = Path(out(["git", "rev-parse", "--show-toplevel"], Path(args.repo)))
-        targets, stacked, skipped = plan(args, repo)
         default = default_branch(repo)
+        targets, stacked, skipped = plan(args, repo, default)
     except DispatchError as e:
         log(f"kdispatch: {e}")
         return 1
@@ -431,7 +354,11 @@ def dispatch(args) -> int:
         for s in skipped:
             log(f"  skip {s}")
         return 1
-    print_plan(targets, stacked, default, skipped)
+    log(f"Plan ({'stacked' if stacked else 'independent'}, default branch `{default}`):")
+    for t in targets:
+        log(f"  {t.issue.short_id}  {t.branch}  ← {t.base}")
+    for s in skipped:
+        log(f"  skip {s}")
     if args.dry_run:
         return 0
     if not args.yes:
@@ -441,57 +368,43 @@ def dispatch(args) -> int:
         if not click.confirm("Proceed?", default=True, err=True):
             return 1
 
-    me = kata_actor()
-    prev_branch = ""
-    dispatched: list[Target] = []
     # Phase 1: claim, branch, push and open the draft PR for each issue, in
-    # order. In a stack each branch builds on the previous one, so a failure
-    # here stops the rest.
+    # order. Any failure (including losing a claim race) aborts the rest, since
+    # a stack can't skip a link; re-run once it's resolved.
+    me = kata_actor()
     for n, t in enumerate(targets):
         try:
             if n == 0:
                 run(["git", "fetch", "origin", default], repo)
-            if t.issue.owner != me:
-                try:
-                    kata_json(["claim", t.issue.ref], repo)
-                except DispatchError as e:
-                    skipped.append(f"{t.issue.short_id}: claim failed ({e})")
-                    continue
             log(f"→ {t.issue.short_id}: {t.branch}")
-            t.base = prev_branch if stacked and prev_branch else default
-            create_branch(repo, t, t.base if t.base != default else f"origin/{default}")
+            if t.issue.owner != me:
+                kata_json(["claim", t.issue.ref], repo)
+            create_branch(repo, t, f"origin/{default}" if t.base == default else t.base)
             run(["git", "push", "-u", "origin", t.branch], repo)
             open_draft_pr(repo, t, stacked)
         except DispatchError as e:
             t.error = str(e)
-            skipped += [f"{r.issue.short_id}: not reached" for r in targets[n + 1:]]
-            report([*dispatched, t], skipped, args.as_json)
+            report(targets[: n + 1], skipped + [f"{r.issue.short_id}: not reached" for r in targets[n + 1:]])
             return 1
-        dispatched.append(t)
-        prev_branch = t.branch
 
-    if stacked and len(dispatched) > 1:
-        if gh_stack_available(repo):
-            proc = run(["gh", "stack", "link", "--base", default, *[t.pr_url for t in dispatched]],
-                       repo, check=False)
-            if proc.returncode != 0:
-                log(f"  warning: gh stack link failed: {(proc.stderr or proc.stdout).strip()}")
-        else:
-            log("  gh-stack not installed: PRs are chained by base branch but not linked as a stack")
+    if stacked and len(targets) > 1:
+        proc = run(["gh", "stack", "link", "--base", default, *[t.pr_url for t in targets]], repo, check=False)
+        if proc.returncode != 0:
+            log(f"  warning: PRs are chained by base branch but `gh stack link` failed "
+                f"(is gh-stack installed?): {(proc.stderr or proc.stdout).strip()}")
 
     # Phase 2: worktree, detached session and Claude for each issue. Failures
     # here are per-issue.
-    for t in dispatched:
+    for t in targets:
         try:
-            ensure_worktree(repo, t)
-            start_session(repo, t)
+            start_session(repo, t, ensure_worktree(repo, t))
             if not args.no_launch:
                 launch_claude(repo, t, build_prompt(repo, t, stacked, default))
         except DispatchError as e:
             t.error = str(e)
 
-    report(dispatched, skipped, args.as_json)
-    return 1 if any(t.error for t in dispatched) else 0
+    report(targets, skipped)
+    return 1 if any(t.error for t in targets) else 0
 
 
 if __name__ == "__main__":
