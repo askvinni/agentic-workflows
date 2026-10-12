@@ -28,6 +28,8 @@ with the user, run it once, and relay the result.
 Other flags: `--only a,b` / `--count N` to narrow a parent's children, `--no-stack` to
 dispatch children independently, `--no-launch` to set everything up without starting
 Claude, `--json` for machine-readable output, `-C <repo>` to run against another repo.
+Run without a terminal (as you do), `kdispatch` never prompts: always pass refs, narrow
+with `--only`, and confirm with `--yes`.
 
 ## Instructions
 

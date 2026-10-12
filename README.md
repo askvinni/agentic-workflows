@@ -331,13 +331,14 @@ Ghosthub shows the new session in its sidebar immediately. For parallel agents, 
 `kdispatch` (in `bin/`, linked to `~/.local/bin` by `setup.py`) does the whole hand-off in one command. It claims the issue, creates the branch, opens a draft PR, attaches a kwt worktree, starts the tmux workspace in the background, and launches Claude in auto mode with the issue as its prompt:
 
 ```sh
+kdispatch                       # pick from the repo's open, unclaimed issues
 kdispatch abc4                  # one issue, or a parent: its children as a stack of PRs
 kdispatch abc4 d4ex             # several independent issues
 kdispatch --stack abc4 d4ex     # several issues stacked in the order given
 kdispatch abc4 --dry-run        # show the plan only
 ```
 
-Sessions show up in Ghosthub without taking over your current window. Re-running is safe: existing claims, branches, PRs, worktrees and sessions are reused. Agents use it through the `/kata-worktree-dispatch` skill.
+Run from a terminal, it asks which issues to dispatch whenever there's more than one candidate, then confirms the plan. Sessions show up in Ghosthub without taking over your current window. Re-running is safe: existing claims, branches, PRs, worktrees and sessions are reused. Agents use it through the `/kata-worktree-dispatch` skill.
 
 ### 4. Agent picks up and works `[Agent]`
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
+# dependencies = ["click>=8.1"]
 # ///
 #
 # kdispatch — dispatch kata issues to background kwt workspaces running Claude.
@@ -11,18 +12,19 @@
 # `claude --permission-mode auto` in it with the issue as the prompt.
 #
 # Usage:
+#   kdispatch                     pick from the repo's open, unclaimed issues
 #   kdispatch <ref>               issue without children → dispatch just that issue
 #                                 issue with children    → dispatch its children as a stack
 #   kdispatch <ref> <ref> ...     several independent issues, each based on the default branch
 #   kdispatch --stack <ref> ...   several issues stacked in the order given
 #
-# Run it from the repository the issues belong to. Re-running is safe: claims,
+# In a terminal, whenever there is more than one candidate issue it asks which to
+# dispatch. Run it from the repository the issues belong to. Re-running is safe: claims,
 # branches, PRs, worktrees and sessions that already exist are reused, and Claude
 # is only launched into a session whose pane is sitting at a shell prompt.
 #
 # KDISPATCH_CLAUDE overrides the command launched in each workspace (default: claude).
 
-import argparse
 import json
 import os
 import re
@@ -33,6 +35,9 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
+
+import click
 
 SHELLS = {"zsh", "bash", "fish", "sh", "dash", "ksh"}
 GHOSTHUB_KWT = "/Applications/Ghosthub.app/Contents/Helpers/kwt"
@@ -56,7 +61,7 @@ def out(args: list[str], cwd: Path) -> str:
 
 
 def log(msg: str) -> None:
-    print(msg, file=sys.stderr, flush=True)
+    click.echo(msg, err=True)
 
 
 # ── kata ─────────────────────────────────────────────────────────────────────
@@ -160,7 +165,8 @@ def pick(issues: list[Issue]) -> list[Issue]:
     for i, issue in enumerate(issues, 1):
         log(f"  {i:>2}. {issue.short_id}  {issue.title}")
     while True:
-        raw = input("Dispatch which? (e.g. 1,3-4; empty = all) ")
+        raw = click.prompt("Dispatch which? (e.g. 1,3-4; empty = all)", default="",
+                           show_default=False, err=True)
         try:
             return [issues[i] for i in parse_selection(raw, len(issues))]
         except ValueError as e:
@@ -181,7 +187,16 @@ def plan(args, repo: Path) -> tuple[list[Target], bool, list[str]]:
             return False
         return True
 
-    roots = [load_issue(r, repo) for r in args.refs]
+    if not args.refs:
+        if not args.interactive:
+            raise DispatchError("no issue refs given (interactive selection needs a terminal)")
+        listed = kata_json(["list", "--unowned"], repo).get("issues") or []
+        roots = [Issue(ref=i["qualified_id"], short_id=i["short_id"], title=i["title"],
+                       status=i["status"], owner=i.get("owner")) for i in listed]
+        if not roots:
+            raise DispatchError("no open, unclaimed issues in this repo's kata project")
+    else:
+        roots = [load_issue(r, repo) for r in args.refs]
     if len(roots) == 1 and roots[0].children:
         stacked = not args.no_stack
         candidates = [load_issue(c, repo) for c in roots[0].children]
@@ -196,9 +211,10 @@ def plan(args, repo: Path) -> tuple[list[Target], bool, list[str]]:
             if i.short_id not in wanted:
                 skipped.append(f"{i.short_id}: not in --only")
         issues = [i for i in issues if i.short_id in wanted]
-    if args.pick and issues:
+    if args.interactive and len(issues) > 1 and not args.only and args.count is None:
         chosen = pick(issues)
-        skipped += [f"{i.short_id}: deselected" for i in issues if i not in chosen]
+        if args.refs:  # picking from the whole backlog: unpicked issues aren't news
+            skipped += [f"{i.short_id}: deselected" for i in issues if i not in chosen]
         issues = chosen
     if args.count is not None:
         skipped += [f"{i.short_id}: beyond --count" for i in issues[args.count:]]
@@ -370,24 +386,30 @@ def report(targets: list[Target], skipped: list[str], as_json: bool) -> None:
         print(f"skipped {s}")
 
 
-def main() -> int:
-    p = argparse.ArgumentParser(
-        prog="kdispatch",
-        description="Dispatch kata issues to background kwt workspaces running Claude.",
-    )
-    p.add_argument("refs", nargs="+", help="kata issue refs")
-    p.add_argument("--stack", action="store_true", help="stack several refs in the order given")
-    p.add_argument("--no-stack", action="store_true", help="dispatch a parent's children independently")
-    p.add_argument("--only", help="comma-separated child refs to dispatch")
-    p.add_argument("--count", type=int, help="dispatch at most N issues")
-    p.add_argument("--pick", action="store_true", help="choose issues interactively")
-    p.add_argument("--dry-run", action="store_true", help="print the plan and change nothing")
-    p.add_argument("--yes", "-y", action="store_true", help="don't ask for confirmation")
-    p.add_argument("--no-launch", action="store_true", help="set everything up but don't start Claude")
-    p.add_argument("--json", action="store_true", help="print the result as JSON")
-    p.add_argument("-C", dest="repo", default=".", help="repository to run in (default: cwd)")
-    args = p.parse_args()
+@click.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.argument("refs", nargs=-1)
+@click.option("--stack", is_flag=True, help="Stack several refs in the order given.")
+@click.option("--no-stack", is_flag=True, help="Dispatch a parent's children independently.")
+@click.option("--only", help="Comma-separated child refs to dispatch.")
+@click.option("--count", type=int, help="Dispatch at most N issues.")
+@click.option("--dry-run", is_flag=True, help="Print the plan and change nothing.")
+@click.option("--yes", "-y", is_flag=True, help="Don't ask for confirmation.")
+@click.option("--no-launch", is_flag=True, help="Set everything up but don't start Claude.")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+@click.option("-C", "repo", default=".", type=click.Path(exists=True, file_okay=False),
+              help="Repository to run in (default: cwd).")
+def main(**opts) -> None:
+    """Dispatch kata issues to background kwt workspaces running Claude.
 
+    With no REFS, pick from the repo's open, unclaimed issues. A ref with
+    children dispatches its children as a stack of PRs; several refs are
+    dispatched independently unless --stack is given.
+    """
+    args = SimpleNamespace(**opts, interactive=sys.stdin.isatty())
+    sys.exit(dispatch(args))
+
+
+def dispatch(args) -> int:
     for tool in ("git", "gh", "kata", "tmux"):
         if not shutil.which(tool):
             log(f"kdispatch: `{tool}` not found on PATH")
@@ -413,10 +435,10 @@ def main() -> int:
     if args.dry_run:
         return 0
     if not args.yes:
-        if not sys.stdin.isatty():
+        if not args.interactive:
             log("kdispatch: not a terminal — pass --yes to confirm")
             return 1
-        if input("Proceed? [Y/n] ").strip().lower() not in ("", "y", "yes"):
+        if not click.confirm("Proceed?", default=True, err=True):
             return 1
 
     me = kata_actor()
@@ -443,7 +465,7 @@ def main() -> int:
         except DispatchError as e:
             t.error = str(e)
             skipped += [f"{r.issue.short_id}: not reached" for r in targets[n + 1:]]
-            report([*dispatched, t], skipped, args.json)
+            report([*dispatched, t], skipped, args.as_json)
             return 1
         dispatched.append(t)
         prev_branch = t.branch
@@ -468,9 +490,9 @@ def main() -> int:
         except DispatchError as e:
             t.error = str(e)
 
-    report(dispatched, skipped, args.json)
+    report(dispatched, skipped, args.as_json)
     return 1 if any(t.error for t in dispatched) else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
