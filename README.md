@@ -348,6 +348,8 @@ git config kdispatch.prTitle '[{meta[jira]}] {title}'
 kata meta set abc4 jira DPAS-1234                                 # metadata the template needs
 ```
 
+When the kata issue mirrors a GitHub issue (a `GitHub: <url>` line in its body, as engram writes), the PR body gets a `Closes owner/repo#N` line, so merging closes the issue and tools like `engram learn` can find the PR — even for stacked PRs that merge into a non-default base.
+
 If an issue lacks a key the template uses, `kdispatch` stops at planning (so `--dry-run` shows it) and prints the `kata meta set` command to fix it. Re-running is safe: existing claims, branches, PRs, worktrees and sessions are reused. Agents use it through the `/kata-worktree-dispatch` skill.
 
 ### 4. Agent picks up and works `[Agent]`

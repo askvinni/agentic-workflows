@@ -80,6 +80,7 @@ class Issue:
     owner: str | None
     meta: dict = field(default_factory=dict)
     children: list[str] = field(default_factory=list)
+    body: str = ""
 
 
 def kata_json(args: list[str], cwd: Path) -> dict:
@@ -107,7 +108,8 @@ def load_issue(ref: str, cwd: Path) -> Issue:
     qualified = next((end["qualified_id"] for l in links for end in (l["from"], l["to"])
                       if end["uid"] == issue["uid"]), ref)
     return Issue(ref=qualified, short_id=issue["short_id"], title=issue["title"], status=issue["status"],
-                 owner=issue.get("owner"), meta=issue.get("metadata") or {}, children=[l["from"]["qualified_id"] for l in children])
+                 owner=issue.get("owner"), meta=issue.get("metadata") or {}, body=issue.get("body") or "",
+                 children=[l["from"]["qualified_id"] for l in children])
 
 
 def kata_actor() -> str:
@@ -185,7 +187,8 @@ def plan(args, repo: Path, default: str) -> tuple[list[Target], bool, list[str]]
             raise DispatchError("no issue refs given (interactive selection needs a terminal)")
         listed = kata_json(["list", "--unowned"], repo).get("issues") or []
         roots = [Issue(ref=i["qualified_id"], short_id=i["short_id"], title=i["title"],
-                       status=i["status"], owner=i.get("owner"), meta=i.get("metadata") or {})
+                       status=i["status"], owner=i.get("owner"), meta=i.get("metadata") or {},
+                       body=i.get("body") or "")
                  for i in listed]
         if not roots:
             raise DispatchError("no open, unclaimed issues in this repo's kata project")
@@ -252,6 +255,20 @@ def create_branch(repo: Path, t: Target, base_rev: str) -> None:
     run(["git", "branch", t.branch, commit], repo)
 
 
+GITHUB_ISSUE_LINE = re.compile(r"^\s*GitHub:\s*https://github\.com/([^/\s]+/[^/\s]+)/issues/(\d+)", re.M)
+
+
+def closes_line(issue: Issue) -> str:
+    """`Closes owner/repo#N` for a kata issue that mirrors a GitHub issue (a `GitHub: <url>` body line).
+
+    Merging into the default branch then closes the GitHub issue, and the reference links the
+    PR to the issue even when a stacked PR merges into a non-default base, so tools like
+    `engram learn` can find it.
+    """
+    m = GITHUB_ISSUE_LINE.search(issue.body)
+    return f"Closes {m.group(1)}#{m.group(2)}" if m else ""
+
+
 def open_draft_pr(repo: Path, t: Target, stacked: bool) -> None:
     existing = json.loads(out(["gh", "pr", "list", "--head", t.branch, "--state", "open",
                                "--json", "url,baseRefName"], repo) or "[]")
@@ -261,6 +278,8 @@ def open_draft_pr(repo: Path, t: Target, stacked: bool) -> None:
             log(f"  warning: existing PR {t.pr_url} targets {existing[0]['baseRefName']}, not {t.base}")
         return
     body = f"Work in progress for kata issue `{t.issue.ref}`." + (f" Stacked on `{t.base}`." if stacked else "")
+    if closes := closes_line(t.issue):
+        body += f"\n\n{closes}"
     t.pr_url = out(["gh", "pr", "create", "--draft", "--head", t.branch, "--base", t.base,
                     "--title", t.pr_title, "--body", body], repo).splitlines()[-1]
 
@@ -306,6 +325,8 @@ def build_prompt(repo: Path, t: Target, stacked: bool, default: str) -> str:
         f"A draft pull request is already open for this branch: {t.pr_url} (base `{t.base}`).",
         "Do not open a new PR and do not change its base.",
     ]
+    if closes := closes_line(t.issue):
+        lines.append(f"Keep the `{closes}` line in the PR body if you edit it.")
     if stacked and t.base != default:
         lines.append(f"It is stacked on `{t.base}` as part of a multi-PR dependency chain — "
                      f"do not rebase it onto `{default}`.")
