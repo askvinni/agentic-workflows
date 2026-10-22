@@ -141,22 +141,47 @@ def sync_skills() -> None:
             ok(f"skill linked: {skill_dir.name} → ~/.claude/skills/{skill_dir.name}")
 
 
+def prune_bin_links(bin_src: Path, bin_dst: Path) -> None:
+    """
+    Remove links in ~/.local/bin/ that point into this repo's bin/ at a tool
+    that no longer exists (e.g. a retired command). Links pointing elsewhere
+    are never touched.
+    """
+    if not bin_dst.is_dir():
+        return
+    bin_src = bin_src.resolve()
+    for link in sorted(bin_dst.iterdir()):
+        if not link.is_symlink():
+            continue
+        target = Path(os.readlink(link))
+        if not target.is_absolute():
+            target = link.parent / target
+        if target.parent.resolve() == bin_src and not target.exists():
+            link.unlink()
+            ok(f"removed stale command link: ~/.local/bin/{link.name}")
+
+
 def sync_bin() -> None:
     """
-    Symlink every executable under bin/ into ~/.local/bin/.
+    Symlink every executable under bin/ into ~/.local/bin/, and prune links to
+    tools that were removed from bin/.
     Idempotent — re-running updates stale symlinks and skips current ones.
     """
     bin_src = Path(__file__).parent / "bin"
-    if not bin_src.exists():
-        skip("no bin/ directory found — skipping CLI sync")
+    bin_dst = Path.home() / ".local" / "bin"
+    prune_bin_links(bin_src, bin_dst)
+
+    tools = [
+        tool for tool in sorted(bin_src.iterdir())
+        if tool.is_file() and os.access(tool, os.X_OK)
+    ] if bin_src.is_dir() else []
+    if not tools:
+        skip("no commands in bin/ — skipping CLI sync")
         return
 
-    bin_dst = Path.home() / ".local" / "bin"
     bin_dst.mkdir(parents=True, exist_ok=True)
 
-    for tool in sorted(bin_src.iterdir()):
-        if not tool.is_file() or not os.access(tool, os.X_OK):
-            continue
+    for tool in tools:
         link = bin_dst / tool.name
         if link.is_symlink() and link.resolve() == tool.resolve():
             skip(f"command already linked: {tool.name}")

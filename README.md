@@ -243,6 +243,7 @@ engram plan list              # show open plan issues
 engram plan status            # show linked issue/PR for the current branch
 engram compact                # audit and remove low-quality or stale memory files
 engram objective new/plan/view  # track multi-PR work under a shared goal
+engram dispatch <N>...        # start plans/objective nodes in background Claude sessions
 engram doctor                 # verify dependencies and config
 ```
 
@@ -326,31 +327,19 @@ kwt open refactor/auth-middleware    # launches a dedicated tmux session
 
 Ghosthub shows the new session in its sidebar immediately. For parallel agents, each gets its own branch and worktree — kwt enforces that no two sessions share a directory.
 
-#### Or: dispatch issues straight to background agents
+#### Or: dispatch plans straight to background agents
 
-`kdispatch` (in `bin/`, linked to `~/.local/bin` by `setup.py`) does the whole hand-off in one command. It claims the issue, creates the branch, opens a draft PR, attaches a kwt worktree, starts the tmux workspace in the background, and launches Claude in auto mode with the issue as its prompt:
-
-```sh
-kdispatch                       # pick from the repo's open, unclaimed issues
-kdispatch abc4                  # one issue, or a parent: its children as a stack of PRs
-kdispatch abc4 d4ex             # several independent issues
-kdispatch --stack abc4 d4ex     # several issues stacked in the order given
-kdispatch abc4 --dry-run        # show the plan only
-```
-
-Run from a terminal, it asks which issues to dispatch whenever there's more than one candidate, then confirms the plan. Sessions show up in Ghosthub without taking over your current window.
-
-Branch names and PR titles default to `<ref>-<title-slug>` and the issue title. Repos with naming conventions set templates in git config (per repo, or `--global` for your default), filled from the kata issue and its metadata:
+`engram dispatch` does the whole hand-off in one command for engram plan and objective issues. It claims the plan's kata mirror, creates the branch, opens a draft PR, attaches a kwt worktree, starts the tmux workspace in the background, and launches Claude in auto mode with the plan as its prompt:
 
 ```sh
-git config kdispatch.branch  '{meta[type]}/{meta[jira]}/{slug}'   # fields: {short_id} {ref} {title} {slug} {meta[key]}
-git config kdispatch.prTitle '[{meta[jira]}] {title}'
-kata meta set abc4 jira DPAS-1234                                 # metadata the template needs
+engram dispatch 42                 # one plan
+engram dispatch 42 43              # several plans, each on the default branch
+engram dispatch 41                 # an objective: its unblocked nodes
+engram dispatch --stack 41         # an objective's dependency chains as stacked PRs
+engram dispatch 41 --dry-run       # show the plan only
 ```
 
-When the kata issue mirrors a GitHub issue (a `GitHub: <url>` line in its body, as engram writes), the PR body gets a `Closes owner/repo#N` line, so merging closes the issue and tools like `engram learn` can find the PR — even for stacked PRs that merge into a non-default base.
-
-If an issue lacks a key the template uses, `kdispatch` stops at planning (so `--dry-run` shows it) and prints the `kata meta set` command to fix it. Re-running is safe: existing claims, branches, PRs, worktrees and sessions are reused. Agents use it through the `/kata-worktree-dispatch` skill.
+Sessions show up in Ghosthub without taking over your current window, and re-running is safe. Branch names and PR titles come from the `[dispatch]` templates in the repo's `.engram/config.toml`. Branch and PR-title templates set in `git config` for the old Python dispatcher are no longer read, so move them there: `prTitle` becomes `pr_title`, and `{short_id}`/`{ref}` become `{kata_ref}`. See the [engram README's Dispatch section](https://github.com/askvinni/engram#dispatch) for the modes, flags and template fields.
 
 ### 4. Agent picks up and works `[Agent]`
 
