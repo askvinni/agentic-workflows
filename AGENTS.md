@@ -233,8 +233,8 @@ engram doctor                                  # verify dependencies and config
 ```
 
 To hand plans to background Claude sessions (branch, draft PR, kwt worktree,
-tmux workspace), use `engram dispatch` through the `/kata-worktree-dispatch`
-skill. Pass issue numbers, preview with `--dry-run`, then run with `--yes`:
+tmux workspace), use `engram dispatch`. Pass issue numbers, preview with
+`--dry-run`, then run with `--yes`:
 
 ```sh
 engram dispatch <plan-or-objective>... --dry-run   # preview, changes nothing

@@ -339,7 +339,7 @@ engram dispatch --stack 41         # an objective's dependency chains as stacked
 engram dispatch 41 --dry-run       # show the plan only
 ```
 
-Sessions show up in Ghosthub without taking over your current window, and re-running is safe. Branch names and PR titles come from the `[dispatch]` templates in the repo's `.engram/config.toml`. Branch and PR-title templates set in `git config` for the old Python dispatcher are no longer read, so move them there: `prTitle` becomes `pr_title`, and `{short_id}`/`{ref}` become `{kata_ref}`. See the [engram README's Dispatch section](https://github.com/askvinni/engram#dispatch) for the modes, flags and template fields. Agents use it through the `/kata-worktree-dispatch` skill.
+Sessions show up in Ghosthub without taking over your current window, and re-running is safe. Branch names and PR titles come from the `[dispatch]` templates in the repo's `.engram/config.toml`. Branch and PR-title templates set in `git config` for the old Python dispatcher are no longer read, so move them there: `prTitle` becomes `pr_title`, and `{short_id}`/`{ref}` become `{kata_ref}`. See the [engram README's Dispatch section](https://github.com/askvinni/engram#dispatch) for the modes, flags and template fields.
 
 ### 4. Agent picks up and works `[Agent]`
 
