@@ -232,6 +232,16 @@ engram compact                                 # prune stale or low-quality memo
 engram doctor                                  # verify dependencies and config
 ```
 
+To hand plans to background Claude sessions (branch, draft PR, kwt worktree,
+tmux workspace), use `engram dispatch` through the `/kata-worktree-dispatch`
+skill. Pass issue numbers, preview with `--dry-run`, then run with `--yes`:
+
+```sh
+engram dispatch <plan-or-objective>... --dry-run   # preview, changes nothing
+engram dispatch <plan-or-objective>... --yes       # dispatch
+engram dispatch --stack <objective> --yes          # dependency chains as stacked PRs
+```
+
 ### Memory categories
 
 | Directory | What it contains |
